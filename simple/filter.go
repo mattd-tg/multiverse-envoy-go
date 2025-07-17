@@ -1,139 +1,298 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
-	"strconv"
+	"io"
+	"strings"
 
+	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/service/s3"
 	"github.com/envoyproxy/envoy/contrib/golang/common/go/api"
+	"github.com/redis/go-redis/v9"
 )
 
-var UpdateUpstreamBody = "upstream response body updated by the simple plugin"
-
-// The callbacks in the filter, like `DecodeHeaders`, can be implemented on demand.
-// Because api.PassThroughStreamFilter provides a default implementation.
-type filter struct {
-	api.PassThroughStreamFilter
-
-	callbacks api.FilterCallbackHandler
-	path      string
-	config    *config
-}
-
-func (f *filter) sendLocalReplyInternal() api.StatusType {
-	body := fmt.Sprintf("%s, path: %s\r\n", f.config.echoBody, f.path)
-	f.callbacks.DecoderFilterCallbacks().SendLocalReply(200, body, nil, 0, "")
-	// Remember to return LocalReply when the request is replied locally
-	return api.LocalReply
-}
-
-// Callbacks which are called in request path
-// The endStream is true if the request doesn't have body
-func (f *filter) DecodeHeaders(header api.RequestHeaderMap, endStream bool) api.StatusType {
-	f.path, _ = header.Get(":path")
-	api.LogDebugf("get path %s", f.path)
-
-	if f.path == "/localreply_by_config" {
-		return f.sendLocalReplyInternal()
+// extractTenantFromHost extracts tenant ID from the Host header
+func (f *ShardRouterFilter) extractTenantFromHost(host string) (string, error) {
+	if f.config.TenantExtractionMode == "subdomain" {
+		// Extract tenant from subdomain (e.g., tenant.example.com -> tenant)
+		parts := strings.Split(host, ".")
+		if len(parts) >= 2 {
+			// Remove port if present
+			tenant := strings.Split(parts[0], ":")[0]
+			if tenant != "" {
+				return tenant, nil
+			}
+		}
+		return "", fmt.Errorf("unable to extract tenant from host: %s", host)
 	}
-	return api.Continue
-	/*
-		// If the code is time-consuming, to avoid blocking the Envoy,
-		// we need to run the code in a background goroutine
-		// and suspend & resume the filter
-		go func() {
-			defer f.callbacks.DecoderFilterCallbacks().RecoverPanic()
-			// do time-consuming jobs
-
-			// resume the filter
-			f.callbacks.DecoderFilterCallbacks().Continue(status)
-		}()
-
-		// suspend the filter
-		return api.Running
-	*/
+	return "", fmt.Errorf("unsupported tenant extraction mode: %s", f.config.TenantExtractionMode)
 }
 
-// DecodeData might be called multiple times during handling the request body.
-// The endStream is true when handling the last piece of the body.
-func (f *filter) DecodeData(buffer api.BufferInstance, endStream bool) api.StatusType {
-	// support suspending & resuming the filter in a background goroutine
-	return api.Continue
-}
-
-func (f *filter) DecodeTrailers(trailers api.RequestTrailerMap) api.StatusType {
-	// support suspending & resuming the filter in a background goroutine
-	return api.Continue
-}
-
-// Callbacks which are called in response path
-// The endStream is true if the response doesn't have body
-func (f *filter) EncodeHeaders(header api.ResponseHeaderMap, endStream bool) api.StatusType {
-	if f.path == "/update_upstream_response" {
-		header.Set("Content-Length", strconv.Itoa(len(UpdateUpstreamBody)))
-	}
-	header.Set("Rsp-Header-From-Go", "bar-test")
-	// support suspending & resuming the filter in a background goroutine
-	return api.Continue
-}
-
-// EncodeData might be called multiple times during handling the response body.
-// The endStream is true when handling the last piece of the body.
-func (f *filter) EncodeData(buffer api.BufferInstance, endStream bool) api.StatusType {
-	if f.path == "/update_upstream_response" {
-		if endStream {
-			buffer.SetString(UpdateUpstreamBody)
-		} else {
-			buffer.Reset()
+// lookupInMemoryCache checks the in-memory cache for tenant-shard mapping
+func (f *ShardRouterFilter) lookupInMemoryCache(tenantID string) (string, bool) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	
+	if f.memoryCache != nil {
+		shardID, found := f.memoryCache.Get(tenantID)
+		if found {
+			api.LogDebugf("Memory cache hit for tenant: %s -> shard: %s", tenantID, shardID)
+			return shardID, true
 		}
 	}
-	// support suspending & resuming the filter in a background goroutine
+	api.LogDebugf("Memory cache miss for tenant: %s", tenantID)
+	return "", false
+}
+
+// lookupInRedisCache checks the Redis cache for tenant-shard mapping
+func (f *ShardRouterFilter) lookupInRedisCache(tenantID string) (string, error) {
+	if f.redisClient == nil {
+		return "", fmt.Errorf("redis client not initialized")
+	}
+	
+	ctx, cancel := context.WithTimeout(context.Background(), f.config.RedisTimeout)
+	defer cancel()
+	
+	key := f.config.RedisKeyPrefix + tenantID
+	result := f.redisClient.Get(ctx, key)
+	
+	if result.Err() == redis.Nil {
+		api.LogDebugf("Redis cache miss for tenant: %s", tenantID)
+		return "", nil
+	} else if result.Err() != nil {
+		api.LogWarnf("Redis lookup error for tenant %s: %v", tenantID, result.Err())
+		return "", result.Err()
+	}
+	
+	shardID, err := result.Result()
+	if err != nil {
+		return "", err
+	}
+	
+	api.LogDebugf("Redis cache hit for tenant: %s -> shard: %s", tenantID, shardID)
+	return shardID, nil
+}
+
+// cacheInRedis stores tenant-shard mapping in Redis
+func (f *ShardRouterFilter) cacheInRedis(tenantID, shardID string) error {
+	if f.redisClient == nil {
+		return fmt.Errorf("redis client not initialized")
+	}
+	
+	ctx, cancel := context.WithTimeout(context.Background(), f.config.RedisTimeout)
+	defer cancel()
+	
+	key := f.config.RedisKeyPrefix + tenantID
+	err := f.redisClient.Set(ctx, key, shardID, f.config.RedisTTL).Err()
+	if err != nil {
+		api.LogWarnf("Failed to cache in Redis for tenant %s: %v", tenantID, err)
+		return err
+	}
+	
+	api.LogDebugf("Cached in Redis: tenant %s -> shard %s", tenantID, shardID)
+	return nil
+}
+
+// lookupInS3 fetches the complete mapping from S3 and searches for the tenant
+func (f *ShardRouterFilter) lookupInS3(tenantID string) (string, error) {
+	if f.s3Client == nil {
+		return "", fmt.Errorf("s3 client not initialized")
+	}
+	
+	ctx, cancel := context.WithTimeout(context.Background(), f.config.S3Timeout)
+	defer cancel()
+	
+	input := &s3.GetObjectInput{
+		Bucket: aws.String(f.config.S3Bucket),
+		Key:    aws.String(f.config.S3Key),
+	}
+	
+	result, err := f.s3Client.GetObjectWithContext(ctx, input)
+	if err != nil {
+		api.LogWarnf("Failed to fetch mapping from S3: %v", err)
+		return "", err
+	}
+	defer result.Body.Close()
+	
+	body, err := io.ReadAll(result.Body)
+	if err != nil {
+		api.LogWarnf("Failed to read S3 object body: %v", err)
+		return "", err
+	}
+	
+	var mappingData MappingData
+	if err := json.Unmarshal(body, &mappingData); err != nil {
+		api.LogWarnf("Failed to parse mapping data from S3: %v", err)
+		return "", err
+	}
+	
+	// Search for the tenant in the mappings
+	for _, mapping := range mappingData.Mappings {
+		if mapping.TenantID == tenantID {
+			api.LogDebugf("S3 lookup hit for tenant: %s -> shard: %s", tenantID, mapping.ShardID)
+			return mapping.ShardID, nil
+		}
+	}
+	
+	api.LogDebugf("S3 lookup miss for tenant: %s", tenantID)
+	return "", nil
+}
+
+// cacheInMemory stores tenant-shard mapping in memory cache
+func (f *ShardRouterFilter) cacheInMemory(tenantID, shardID string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	
+	if f.memoryCache != nil {
+		f.memoryCache.Add(tenantID, shardID)
+		api.LogDebugf("Cached in memory: tenant %s -> shard %s", tenantID, shardID)
+	}
+}
+
+// orchestratedLookup performs the complete lookup strategy with fallback
+func (f *ShardRouterFilter) orchestratedLookup(tenantID string) (string, error) {
+	// Tier 1: Memory cache lookup
+	if shardID, found := f.lookupInMemoryCache(tenantID); found {
+		return shardID, nil
+	}
+	
+	// Tier 2: Redis cache lookup
+	shardID, err := f.lookupInRedisCache(tenantID)
+	if err != nil {
+		api.LogWarnf("Redis lookup failed for tenant %s: %v", tenantID, err)
+	} else if shardID != "" {
+		// Cache in memory for faster future lookups
+		f.cacheInMemory(tenantID, shardID)
+		return shardID, nil
+	}
+	
+	// Tier 3: S3 lookup (source of truth)
+	shardID, err = f.lookupInS3(tenantID)
+	if err != nil {
+		api.LogWarnf("S3 lookup failed for tenant %s: %v", tenantID, err)
+		return "", err
+	}
+	
+	if shardID != "" {
+		// Cache in both Redis and memory
+		if err := f.cacheInRedis(tenantID, shardID); err != nil {
+			api.LogWarnf("Failed to cache in Redis: %v", err)
+		}
+		f.cacheInMemory(tenantID, shardID)
+		return shardID, nil
+	}
+	
+	// No mapping found
+	return "", fmt.Errorf("no shard mapping found for tenant: %s", tenantID)
+}
+
+// DecodeHeaders is the main entry point for processing requests
+func (f *ShardRouterFilter) DecodeHeaders(header api.RequestHeaderMap, endStream bool) api.StatusType {
+	// Check if X-SHARD-ID header is already present
+	if existingShardID, exists := header.Get("X-SHARD-ID"); exists {
+		api.LogDebugf("X-SHARD-ID header already present: %s", existingShardID)
+		return api.Continue
+	}
+	
+	// Extract tenant ID from request
+	var tenantID string
+	var err error
+	
+	if f.config.TenantExtractionMode == "header" {
+		// Extract tenant from header
+		if headerTenantID, exists := header.Get(f.config.TenantHeaderName); exists {
+			tenantID = headerTenantID
+		} else {
+			api.LogWarnf("Tenant header %s not found", f.config.TenantHeaderName)
+			return api.Continue
+		}
+	} else {
+		// Extract tenant from Host header
+		if host, exists := header.Get(":authority"); exists {
+			tenantID, err = f.extractTenantFromHost(host)
+			if err != nil {
+				api.LogWarnf("Failed to extract tenant from host %s: %v", host, err)
+				return api.Continue
+			}
+		} else {
+			api.LogWarnf("Host header not found")
+			return api.Continue
+		}
+	}
+	
+	if tenantID == "" {
+		api.LogWarnf("Unable to determine tenant ID")
+		return api.Continue
+	}
+	
+	api.LogDebugf("Extracted tenant ID: %s", tenantID)
+	
+	// Perform orchestrated lookup for shard ID
+	shardID, err := f.orchestratedLookup(tenantID)
+	if err != nil {
+		api.LogWarnf("Failed to lookup shard for tenant %s: %v", tenantID, err)
+		return api.Continue
+	}
+	
+	// Set X-SHARD-ID header
+	header.Set("X-SHARD-ID", shardID)
+	api.LogDebugf("Set X-SHARD-ID header: %s for tenant: %s", shardID, tenantID)
+	
 	return api.Continue
 }
 
-func (f *filter) EncodeTrailers(trailers api.ResponseTrailerMap) api.StatusType {
+// DecodeData handles request body processing
+func (f *ShardRouterFilter) DecodeData(buffer api.BufferInstance, endStream bool) api.StatusType {
 	return api.Continue
 }
 
-// OnLog is called when the HTTP stream is ended on HTTP Connection Manager filter.
-func (f *filter) OnLog(reqHeader api.RequestHeaderMap, reqTrailer api.RequestTrailerMap, respHeader api.ResponseHeaderMap, respTrailer api.ResponseTrailerMap) {
-	code, _ := f.callbacks.StreamInfo().ResponseCode()
-	respCode := strconv.Itoa(int(code))
-	api.LogDebug(respCode)
-
-	/*
-		// It's possible to kick off a goroutine here.
-		// But it's unsafe to access the f.callbacks because the FilterCallbackHandler
-		// may be already released when the goroutine is scheduled.
-		go func() {
-			defer func() {
-				if p := recover(); p != nil {
-					const size = 64 << 10
-					buf := make([]byte, size)
-					buf = buf[:runtime.Stack(buf, false)]
-					fmt.Printf("http: panic serving: %v\n%s", p, buf)
-				}
-			}()
-
-			// do time-consuming jobs
-		}()
-	*/
+// DecodeTrailers handles request trailers
+func (f *ShardRouterFilter) DecodeTrailers(trailers api.RequestTrailerMap) api.StatusType {
+	return api.Continue
 }
 
-// OnLogDownstreamStart is called when HTTP Connection Manager filter receives a new HTTP request
-// (required the corresponding access log type is enabled)
-func (f *filter) OnLogDownstreamStart(reqHeader api.RequestHeaderMap) {
-	// also support kicking off a goroutine here, like OnLog.
+// EncodeHeaders handles response headers
+func (f *ShardRouterFilter) EncodeHeaders(header api.ResponseHeaderMap, endStream bool) api.StatusType {
+	return api.Continue
 }
 
-// OnLogDownstreamPeriodic is called on any HTTP Connection Manager periodic log record
-// (required the corresponding access log type is enabled)
-func (f *filter) OnLogDownstreamPeriodic(reqHeader api.RequestHeaderMap, reqTrailer api.RequestTrailerMap, respHeader api.ResponseHeaderMap, respTrailer api.ResponseTrailerMap) {
-	// also support kicking off a goroutine here, like OnLog.
+// EncodeData handles response body processing
+func (f *ShardRouterFilter) EncodeData(buffer api.BufferInstance, endStream bool) api.StatusType {
+	return api.Continue
 }
 
-func (f *filter) OnDestroy(reason api.DestroyReason) {
-	// One should not access f.callbacks here because the FilterCallbackHandler
-	// is released. But we can still access other Go fields in the filter f.
-
-	// goroutine can be used everywhere.
+// EncodeTrailers handles response trailers
+func (f *ShardRouterFilter) EncodeTrailers(trailers api.ResponseTrailerMap) api.StatusType {
+	return api.Continue
 }
+
+// OnLog is called when the HTTP stream is ended
+func (f *ShardRouterFilter) OnLog(reqHeader api.RequestHeaderMap, reqTrailer api.RequestTrailerMap, respHeader api.ResponseHeaderMap, respTrailer api.ResponseTrailerMap) {
+	// Log metrics and monitoring information
+	if shardID, exists := reqHeader.Get("X-SHARD-ID"); exists {
+		api.LogDebugf("Request processed with shard ID: %s", shardID)
+	}
+}
+
+// OnLogDownstreamStart is called when a new HTTP request is received
+func (f *ShardRouterFilter) OnLogDownstreamStart(reqHeader api.RequestHeaderMap) {
+	// Log request start
+}
+
+// OnLogDownstreamPeriodic is called periodically during request processing
+func (f *ShardRouterFilter) OnLogDownstreamPeriodic(reqHeader api.RequestHeaderMap, reqTrailer api.RequestTrailerMap, respHeader api.ResponseHeaderMap, respTrailer api.ResponseTrailerMap) {
+	// Log periodic information
+}
+
+// OnDestroy is called when the filter is being destroyed
+func (f *ShardRouterFilter) OnDestroy(reason api.DestroyReason) {
+	// Cleanup resources
+	if f.redisClient != nil {
+		f.redisClient.Close()
+	}
+	
+	api.LogDebugf("ShardRouterFilter destroyed, reason: %v", reason)
+}
+

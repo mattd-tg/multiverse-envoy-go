@@ -2,8 +2,8 @@ services:
   go_plugin_compile:
     user: ${UID:-1000}:${GID:-1000}
     build:
-      context: simple
-      dockerfile: ../../shared/golang/Dockerfile
+      context: .
+      dockerfile: ./Dockerfile
       target: golang-base
     command: >
       bash -c "

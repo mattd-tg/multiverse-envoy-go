@@ -3,7 +3,7 @@ services:
   proxy:
     build:
       context: .
-      dockerfile: ../shared/envoy/Dockerfile
+      dockerfile: ./Dockerfile
       target: envoy-go
       args:
         ENVOY_VARIANT: contrib-dev
@@ -15,5 +15,5 @@ services:
 
   helloworld_service:
     build:
-      context: ../shared/python
+      context: ./helloworld_service
       target: aiohttp-hello-service
