@@ -98,18 +98,6 @@ Step 3: Test tenant extraction from subdomain
 
 Test the shard router's ability to extract tenant ID from subdomains and inject the correct shard ID.
 
-**Specific validation (Gemini Pro approach):**
-
-.. code-block:: console
-
-   $ curl -H "Host: tenant1.example.com" localhost:10000 -v 2>&1 | grep "X-SHARD-ID: shard-a"
-   < X-SHARD-ID: shard-a
-
-   $ curl -H "Host: tenant2.example.com" localhost:10000 -v 2>&1 | grep "X-SHARD-ID: shard-b"
-   < X-SHARD-ID: shard-b
-
-**Broader validation (Opus approach):**
-
 .. code-block:: console
 
    $ curl -H "Host: tenant1.example.com" localhost:10000 -v 2>&1 | grep "X-SHARD-ID"
@@ -122,18 +110,6 @@ Step 4: Test tenant extraction from headers
 *******************************************
 
 Test the shard router's ability to extract tenant ID from custom headers.
-
-**Specific validation:**
-
-.. code-block:: console
-
-   $ curl -H "X-Tenant-ID: tenant1" localhost:10000 -v 2>&1 | grep "X-SHARD-ID: shard-a"
-   < X-SHARD-ID: shard-a
-
-   $ curl -H "X-Tenant-ID: tenant3" localhost:10000 -v 2>&1 | grep "X-SHARD-ID: shard-a"
-   < X-SHARD-ID: shard-a
-
-**Broader validation:**
 
 .. code-block:: console
 
