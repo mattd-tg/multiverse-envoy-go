@@ -27,7 +27,12 @@ services:
   helloworld_service:
     build:
       context: ./helloworld_service
-      target: aiohttp-hello-service
+      target: hello-service
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   redis:
     image: redis
