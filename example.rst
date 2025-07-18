@@ -1,7 +1,7 @@
 .. _install_sandboxes_golang_http:
 
-Golang HTTP filter
-==================
+Shard Router Filter
+===================
 
 .. sidebar:: Requirements
 
@@ -10,17 +10,42 @@ Golang HTTP filter
    :ref:`curl <start_sandboxes_setup_curl>`
         Used to make HTTP requests.
 
-In this example, we show how the `Golang <https://go.dev/>`_ filter can be used with the Envoy
+   **Redis**
+        Used for distributed caching of tenant-shard mappings.
+
+   **AWS S3**
+        Used as the source of truth for tenant-shard mapping data.
+
+In this example, we show how the `Golang <https://go.dev/>`_ shard router filter can be used with the Envoy
 proxy.
 
-The example demonstrates a Go plugin that can respond directly to requests and also update responses provided by an upstream server.
+The example demonstrates a multi-tiered caching system that maps tenant IDs to shard IDs using:
+- **Memory cache** (fastest, first-tier lookup)
+- **Redis cache** (distributed, second-tier lookup)
+- **S3 storage** (source of truth, third-tier lookup)
 
-It also shows how Go plugins can be independently configured at runtime.
+The filter supports tenant extraction from both subdomains and custom headers, and automatically injects
+the ``X-SHARD-ID`` header for downstream services.
 
-Step 1: Compile the go plugin library
-*************************************
+Step 1: Prepare test data and compile the plugin
+************************************************
 
-Ensure you are in the project root directory and build the go plugin library.
+First, create sample tenant-shard mapping data in S3 format:
+
+.. code-block:: console
+
+   $ cat > /tmp/tenant-shard-mapping.json << 'EOF'
+   {
+     "mappings": [
+       {"tenant_id": "tenant1", "shard_id": "shard-a"},
+       {"tenant_id": "tenant2", "shard_id": "shard-b"},
+       {"tenant_id": "tenant3", "shard_id": "shard-a"},
+       {"tenant_id": "acme", "shard_id": "shard-c"}
+     ]
+   }
+   EOF
+
+Ensure you are in the project root directory and build the shard router plugin library.
 
 .. code-block:: console
 
@@ -33,10 +58,10 @@ The compiled library should now be in the ``lib`` folder.
    $ ls lib
    simple.so
 
-Step 2: Start all of our containers
-***********************************
+Step 2: Start services and upload test data
+********************************************
 
-Start all the containers.
+Start all the containers including Redis and Minio services.
 
 .. code-block:: console
 
@@ -48,37 +73,234 @@ Start all the containers.
   -----------------------------------------------------------------------------------------------------------------------
   golang_proxy_1         /docker-entrypoint.sh /usr ...   Up      10000/tcp, 0.0.0.0:10000->10000/tcp,:::10000->10000/tcp
   golang_web_service_1   /bin/echo-server                 Up      8080/tcp
+  redis_1                redis-server                     Up      6379/tcp
+  minio_1                minio server /data               Up      9000/tcp, 9001/tcp
 
-Step 3: Make a request handled by the Go plugin
+Configure Minio client and upload test data:
+
+.. code-block:: console
+
+  $ mc alias set local http://localhost:9000 minioadmin minioadmin
+  $ mc mb local/tenant-mappings
+  $ mc cp /tmp/tenant-shard-mapping.json local/tenant-mappings/mappings.json
+
+Verify the data was uploaded:
+
+.. code-block:: console
+
+  $ mc ls local/tenant-mappings/
+  [2024-01-01 00:00:00 UTC]   123B mappings.json
+
+You can also access the Minio web interface at http://localhost:9001 (default credentials: minioadmin/minioadmin).
+
+Step 3: Test tenant extraction from subdomain
+**********************************************
+
+Test the shard router's ability to extract tenant ID from subdomains and inject the correct shard ID.
+
+**Specific validation (Gemini Pro approach):**
+
+.. code-block:: console
+
+   $ curl -H "Host: tenant1.example.com" localhost:10000 -v 2>&1 | grep "X-SHARD-ID: shard-a"
+   < X-SHARD-ID: shard-a
+
+   $ curl -H "Host: tenant2.example.com" localhost:10000 -v 2>&1 | grep "X-SHARD-ID: shard-b"
+   < X-SHARD-ID: shard-b
+
+**Broader validation (Opus approach):**
+
+.. code-block:: console
+
+   $ curl -H "Host: tenant1.example.com" localhost:10000 -v 2>&1 | grep "X-SHARD-ID"
+   < X-SHARD-ID: shard-a
+
+   $ curl -H "Host: acme.example.com" localhost:10000 -v 2>&1 | grep "X-SHARD-ID"
+   < X-SHARD-ID: shard-c
+
+Step 4: Test tenant extraction from headers
+*******************************************
+
+Test the shard router's ability to extract tenant ID from custom headers.
+
+**Specific validation:**
+
+.. code-block:: console
+
+   $ curl -H "X-Tenant-ID: tenant1" localhost:10000 -v 2>&1 | grep "X-SHARD-ID: shard-a"
+   < X-SHARD-ID: shard-a
+
+   $ curl -H "X-Tenant-ID: tenant3" localhost:10000 -v 2>&1 | grep "X-SHARD-ID: shard-a"
+   < X-SHARD-ID: shard-a
+
+**Broader validation:**
+
+.. code-block:: console
+
+   $ curl -H "X-Tenant-ID: tenant2" localhost:10000 -v 2>&1 | grep "X-SHARD-ID"
+   < X-SHARD-ID: shard-b
+
+Step 5: Test cache tier functionality
+*************************************
+
+Test the multi-tiered caching system (memory → Redis → S3).
+
+**Memory cache test (repeat requests):**
+
+.. code-block:: console
+
+   $ curl -H "Host: tenant1.example.com" localhost:10000 -v 2>&1 | grep "X-SHARD-ID"
+   < X-SHARD-ID: shard-a
+
+   # Second request should hit memory cache (check logs for faster response)
+   $ curl -H "Host: tenant1.example.com" localhost:10000 -v 2>&1 | grep "X-SHARD-ID"
+   < X-SHARD-ID: shard-a
+
+**Redis cache verification:**
+
+.. code-block:: console
+
+   $ docker exec redis_1 redis-cli get "shard_router:tenant1"
+   "shard-a"
+
+   $ docker exec redis_1 redis-cli get "shard_router:tenant2"
+   "shard-b"
+
+**S3 fallback test (disable Redis temporarily):**
+
+.. code-block:: console
+
+   $ docker stop redis_1
+   $ curl -H "Host: tenant1.example.com" localhost:10000 -v 2>&1 | grep "X-SHARD-ID"
+   < X-SHARD-ID: shard-a
+
+   $ docker start redis_1
+
+Step 6: Test error handling and edge cases
+******************************************
+
+Test how the shard router handles various failure scenarios and edge cases.
+
+**Unknown tenant test:**
+
+.. code-block:: console
+
+   $ curl -H "Host: unknown.example.com" localhost:10000 -v 2>&1 | grep "X-SHARD-ID"
+   # Should return no X-SHARD-ID header or default behavior
+
+**Invalid tenant formats:**
+
+.. code-block:: console
+
+   $ curl -H "Host: .example.com" localhost:10000 -v 2>&1 | grep "X-SHARD-ID"
+   # Should handle malformed subdomain gracefully
+
+   $ curl -H "X-Tenant-ID: " localhost:10000 -v 2>&1 | grep "X-SHARD-ID"
+   # Should handle empty tenant ID
+
+**Service dependency failures:**
+
+.. code-block:: console
+
+   # Test with Minio unavailable
+   $ docker stop minio_1
+   $ curl -H "Host: newclient.example.com" localhost:10000 -v 2>&1 | grep "X-SHARD-ID"
+   # Should handle S3 unavailability gracefully
+   $ docker start minio_1
+
+**Existing shard header test:**
+
+.. code-block:: console
+
+   $ curl -H "Host: tenant1.example.com" -H "X-SHARD-ID: existing-shard" localhost:10000 -v 2>&1 | grep "X-SHARD-ID"
+   < X-SHARD-ID: existing-shard
+   # Should preserve existing shard header
+
+Step 7: Operational verification and monitoring
 ***********************************************
 
-The output from the ``curl`` command below should include the header added by the simple Go plugin.
+Verify operational aspects of the shard router.
+
+**Cache TTL expiration test:**
 
 .. code-block:: console
 
-   $ curl -v localhost:10000 2>&1 | grep rsp-header-from-go
-   < rsp-header-from-go: bar-test
+   # Wait for Redis TTL to expire (default 5 minutes) or manually expire
+   $ docker exec redis_1 redis-cli del "shard_router:tenant1"
+   $ curl -H "Host: tenant1.example.com" localhost:10000 -v 2>&1 | grep "X-SHARD-ID"
+   < X-SHARD-ID: shard-a
 
-Step 4: Make a request handled upstream and updated by the Go plugin
-********************************************************************
+   # Verify cache was repopulated
+   $ docker exec redis_1 redis-cli get "shard_router:tenant1"
+   "shard-a"
 
-The output from the ``curl`` command below should include the body that has been updated by the simple Go plugin.
-
-.. code-block:: console
-
-   $ curl localhost:10000/update_upstream_response 2>&1 | grep "updated"
-   upstream response body updated by the simple plugin
-
-Step 5: Make a request handled by the Go plugin using custom configuration
-**************************************************************************
-
-The output from the ``curl`` command below should include the body that contains value of
-``prefix_localreply_body`` by the simple Go plugin.
+**Logging verification:**
 
 .. code-block:: console
 
-   $ curl localhost:10000/localreply_by_config  2>&1 | grep "localreply"
-   Configured local reply from go, path: /localreply_by_config
+   $ docker logs golang_proxy_1 2>&1 | grep "shard_router"
+   # Should show cache hits, misses, and tenant extraction logs
+
+**Performance characteristics test:**
+
+.. code-block:: console
+
+   # Test multiple requests to observe cache performance
+   $ time curl -H "Host: tenant1.example.com" localhost:10000 -s > /dev/null
+   $ time curl -H "Host: tenant1.example.com" localhost:10000 -s > /dev/null
+   # Second request should be faster due to memory cache
+
+**Cache warming procedure:**
+
+.. code-block:: console
+
+   # Warm cache for all known tenants
+   $ for tenant in tenant1 tenant2 tenant3 acme; do
+       curl -H "Host: $tenant.example.com" localhost:10000 -s > /dev/null
+       echo "Warmed cache for $tenant"
+     done
+
+   # Verify all tenants are cached
+   $ docker exec redis_1 redis-cli keys "shard_router:*"
+   1) "shard_router:tenant1"
+   2) "shard_router:tenant2"
+   3) "shard_router:tenant3"
+   4) "shard_router:acme"
+
+Troubleshooting
+***************
+
+If you encounter issues:
+
+1. **Check service health:**
+
+   .. code-block:: console
+
+      $ docker ps
+      $ docker logs golang_proxy_1
+      $ docker logs redis_1
+      $ docker logs minio_1
+
+2. **Verify data in Minio:**
+
+   .. code-block:: console
+
+      $ mc ls local/tenant-mappings/
+      $ mc cat local/tenant-mappings/mappings.json
+
+3. **Check Redis cache:**
+
+   .. code-block:: console
+
+      $ docker exec redis_1 redis-cli keys "*"
+      $ docker exec redis_1 redis-cli flushall  # Clear cache if needed
+
+4. **Test connectivity:**
+
+   .. code-block:: console
+
+      $ curl -v localhost:10000/health  # If health endpoint exists
+      $ docker exec golang_proxy_1 curl -v localhost:9000  # Test Minio from proxy
 
 .. seealso::
 

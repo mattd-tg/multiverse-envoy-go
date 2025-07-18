@@ -38,9 +38,10 @@ type MappingData struct {
 // PluginConfig represents the plugin configuration
 type PluginConfig struct {
 	// S3 configuration
-	S3Bucket string `json:"s3_bucket"`
-	S3Key    string `json:"s3_key"`
-	S3Region string `json:"s3_region"`
+	S3Bucket   string `json:"s3_bucket"`
+	S3Key      string `json:"s3_key"`
+	S3Region   string `json:"s3_region"`
+	S3Endpoint string `json:"s3_endpoint"`
 	
 	// Redis configuration
 	RedisAddr     string `json:"redis_addr"`
@@ -72,6 +73,9 @@ type ShardRouterFilter struct {
 	memoryCache *lru.Cache[string, string]
 	redisClient *redis.Client
 	s3Client    *s3.S3
+	
+	// Current request state
+	currentShardID string
 	
 	// Synchronization
 	mu sync.RWMutex
@@ -119,6 +123,14 @@ func (p *parser) Parse(any *anypb.Any, callbacks api.ConfigCallbackHandler) (int
 		}
 	} else {
 		conf.S3Region = "us-east-1" // default
+	}
+	
+	if s3Endpoint, ok := v.AsMap()["s3_endpoint"]; ok {
+		if str, ok := s3Endpoint.(string); ok {
+			conf.S3Endpoint = str
+		} else {
+			return nil, errors.New("s3_endpoint must be a string")
+		}
 	}
 	
 	// Parse Redis configuration
@@ -248,6 +260,9 @@ func (p *parser) Merge(parent interface{}, child interface{}) interface{} {
 	if childConfig.S3Region != "" {
 		newConfig.S3Region = childConfig.S3Region
 	}
+	if childConfig.S3Endpoint != "" {
+		newConfig.S3Endpoint = childConfig.S3Endpoint
+	}
 	if childConfig.RedisAddr != "" {
 		newConfig.RedisAddr = childConfig.RedisAddr
 	}
@@ -302,9 +317,17 @@ func filterFactory(c interface{}, callbacks api.FilterCallbackHandler) api.Strea
 	})
 	
 	// Initialize S3 client
-	sess, err := session.NewSession(&aws.Config{
+	awsConfig := &aws.Config{
 		Region: aws.String(conf.S3Region),
-	})
+	}
+	
+	// Configure custom endpoint for Minio compatibility
+	if conf.S3Endpoint != "" {
+		awsConfig.Endpoint = aws.String(conf.S3Endpoint)
+		awsConfig.S3ForcePathStyle = aws.Bool(true)
+	}
+	
+	sess, err := session.NewSession(awsConfig)
 	if err != nil {
 		panic(fmt.Sprintf("failed to create AWS session: %v", err))
 	}

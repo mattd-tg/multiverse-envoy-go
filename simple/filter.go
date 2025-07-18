@@ -236,9 +236,9 @@ func (f *ShardRouterFilter) DecodeHeaders(header api.RequestHeaderMap, endStream
 		return api.Continue
 	}
 	
-	// Set X-SHARD-ID header
-	header.Set("X-SHARD-ID", shardID)
-	api.LogDebugf("Set X-SHARD-ID header: %s for tenant: %s", shardID, tenantID)
+	// Store shard ID for response headers
+	f.currentShardID = shardID
+	api.LogDebugf("Found shard ID: %s for tenant: %s", shardID, tenantID)
 	
 	return api.Continue
 }
@@ -255,6 +255,11 @@ func (f *ShardRouterFilter) DecodeTrailers(trailers api.RequestTrailerMap) api.S
 
 // EncodeHeaders handles response headers
 func (f *ShardRouterFilter) EncodeHeaders(header api.ResponseHeaderMap, endStream bool) api.StatusType {
+	// Add X-SHARD-ID header if we found a shard for this request
+	if f.currentShardID != "" {
+		header.Set("X-SHARD-ID", f.currentShardID)
+		api.LogDebugf("Added X-SHARD-ID response header: %s", f.currentShardID)
+	}
 	return api.Continue
 }
 
