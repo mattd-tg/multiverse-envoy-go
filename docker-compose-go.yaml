@@ -8,8 +8,8 @@ services:
     command: >
       bash -c "
       mkdir -p lib
-      && cd simple
-      && go build -o ../lib/simple.so -buildmode=c-shared ."
+      && cd proxy
+      && go build -o ../lib/proxy.so -buildmode=c-shared ."
     working_dir: /source
     environment:
     - GOFLAGS=-buildvcs=false

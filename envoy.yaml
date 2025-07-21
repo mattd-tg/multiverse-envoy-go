@@ -16,8 +16,8 @@ static_resources:
           - name: envoy.filters.http.golang
             typed_config:
               "@type": type.googleapis.com/envoy.extensions.filters.http.golang.v3alpha.Config
-              library_id: simple
-              library_path: "lib/simple.so"
+              library_id: proxy
+              library_path: "lib/proxy.so"
               plugin_name: shard_router
               plugin_config:
                 "@type": type.googleapis.com/xds.type.v3.TypedStruct

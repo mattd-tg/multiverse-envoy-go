@@ -292,3 +292,5 @@ func (f *ShardRouterFilter) OnDestroy(reason api.DestroyReason) {
 
 	api.LogDebugf("ShardRouterFilter destroyed, reason: %v", reason)
 }
+
+func main() {}

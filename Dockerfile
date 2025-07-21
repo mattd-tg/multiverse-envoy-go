@@ -93,4 +93,4 @@ CMD ["/usr/local/bin/envoy", "-c", "/etc/envoy.yaml"]
 
 FROM envoy-base AS envoy-go
 ENV GODEBUG=cgocheck=0
-COPY --chmod=777 ./lib/simple.so /lib/simple.so
+COPY --chmod=777 ./lib/proxy.so /lib/proxy.so

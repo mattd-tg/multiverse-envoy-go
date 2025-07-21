@@ -13,7 +13,7 @@ Shard Router Filter
    **Redis**
         Used for distributed caching of tenant-shard mappings.
 
-   **AWS S3**
+   **Minio**
         Used as the source of truth for tenant-shard mapping data.
 
 In this example, we show how the `Golang <https://go.dev/>`_ shard router filter can be used with the Envoy
@@ -56,7 +56,7 @@ The compiled library should now be in the ``lib`` folder.
 .. code-block:: console
 
    $ ls lib
-   simple.so
+   proxy.so
 
 Step 2: Start services and upload test data
 ********************************************
