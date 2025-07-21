@@ -16,16 +16,14 @@ the `x-shard-id` header for downstream services.
 First, create sample tenant-shard mapping data in S3 format:
 
 ```console
-$ cat > /tmp/tenant-shard-mapping.json << 'EOF'
-{
+$ echo '{
   "mappings": [
     {"tenant_id": "tenant1", "shard_id": "shard-a"},
     {"tenant_id": "tenant2", "shard_id": "shard-b"},
     {"tenant_id": "tenant3", "shard_id": "shard-a"},
     {"tenant_id": "acme", "shard_id": "shard-c"}
   ]
-}
-EOF
+}' > /tmp/tenant-shard-mapping.json
 ```
 
 Ensure you are in the project root directory and build the shard router plugin library.
