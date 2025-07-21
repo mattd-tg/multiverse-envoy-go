@@ -186,8 +186,8 @@ func (f *ShardRouterFilter) orchestratedLookup(tenantID string) (string, error) 
 
 // main entry point for processing requests
 func (f *ShardRouterFilter) DecodeHeaders(header api.RequestHeaderMap, endStream bool) api.StatusType {
-	if existingShardID, exists := header.Get("X-SHARD-ID"); exists {
-		api.LogDebugf("X-SHARD-ID header already present: %s", existingShardID)
+	if existingShardID, exists := header.Get("x-shard-id"); exists {
+		api.LogDebugf("x-shard-id header already present: %s", existingShardID)
 		return api.Continue
 	}
 
@@ -247,10 +247,10 @@ func (f *ShardRouterFilter) DecodeTrailers(trailers api.RequestTrailerMap) api.S
 
 // EncodeHeaders handles response headers
 func (f *ShardRouterFilter) EncodeHeaders(header api.ResponseHeaderMap, endStream bool) api.StatusType {
-	// Add X-SHARD-ID header if we found a shard for this request
+	// Add x-shard-id header if we found a shard for this request
 	if f.currentShardID != "" {
-		header.Set("X-SHARD-ID", f.currentShardID)
-		api.LogDebugf("Added X-SHARD-ID response header: %s", f.currentShardID)
+		header.Set("x-shard-id", f.currentShardID)
+		api.LogDebugf("Added x-shard-id response header: %s", f.currentShardID)
 	}
 	return api.Continue
 }
@@ -268,7 +268,7 @@ func (f *ShardRouterFilter) EncodeTrailers(trailers api.ResponseTrailerMap) api.
 // OnLog is called when the HTTP stream is ended
 func (f *ShardRouterFilter) OnLog(reqHeader api.RequestHeaderMap, reqTrailer api.RequestTrailerMap, respHeader api.ResponseHeaderMap, respTrailer api.ResponseTrailerMap) {
 	// Log metrics and monitoring information
-	if shardID, exists := reqHeader.Get("X-SHARD-ID"); exists {
+	if shardID, exists := reqHeader.Get("x-shard-id"); exists {
 		api.LogDebugf("Request processed with shard ID: %s", shardID)
 	}
 }

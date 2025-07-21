@@ -9,7 +9,7 @@ The example demonstrates a multi-tiered caching system that maps tenant IDs to s
 - **S3 storage** (source of truth, third-tier lookup)
 
 The filter supports tenant extraction from both subdomains and custom headers, and automatically injects
-the `X-SHARD-ID` header for downstream services.
+the `x-shard-id` header for downstream services.
 
 ## Step 1: Prepare test data and compile the plugin
 
@@ -81,10 +81,10 @@ Test the shard router's ability to extract tenant ID from subdomains and inject 
 
 ```console
 $ curl -H "Host: tenant1.example.com" localhost:10000 -v 2>&1 | grep "x-shard-id"
-< X-SHARD-ID: shard-a
+< x-shard-id: shard-a
 
 $ curl -H "Host: acme.example.com" localhost:10000 -v 2>&1 | grep "x-shard-id"
-< X-SHARD-ID: shard-c
+< x-shard-id: shard-c
 ```
 
 ## Step 4: Test tenant extraction from headers
@@ -92,8 +92,8 @@ $ curl -H "Host: acme.example.com" localhost:10000 -v 2>&1 | grep "x-shard-id"
 Test the shard router's ability to extract tenant ID from custom headers.
 
 ```console
-$ curl -H "X-Tenant-ID: tenant2" localhost:10000 -v 2>&1 | grep "X-SHARD-ID"
-< X-SHARD-ID: shard-b
+$ curl -H "X-Tenant-ID: tenant2" localhost:10000 -v 2>&1 | grep "x-shard-id"
+< x-shard-id: shard-b
 ```
 
 ## Step 5: Test cache tier functionality
@@ -103,12 +103,12 @@ Test the multi-tiered caching system (memory → Redis → S3).
 **Memory cache test (repeat requests):**
 
 ```console
-$ curl -H "Host: tenant1.example.com" localhost:10000 -v 2>&1 | grep "X-SHARD-ID"
-< X-SHARD-ID: shard-a
+$ curl -H "Host: tenant1.example.com" localhost:10000 -v 2>&1 | grep "x-shard-id"
+< x-shard-id: shard-a
 
 # Second request should hit memory cache (check logs for faster response)
-$ curl -H "Host: tenant1.example.com" localhost:10000 -v 2>&1 | grep "X-SHARD-ID"
-< X-SHARD-ID: shard-a
+$ curl -H "Host: tenant1.example.com" localhost:10000 -v 2>&1 | grep "x-shard-id"
+< x-shard-id: shard-a
 ```
 
 **Redis cache verification:**
@@ -125,8 +125,8 @@ $ docker exec redis_1 redis-cli get "shard_router:tenant2"
 
 ```console
 $ docker stop redis_1
-$ curl -H "Host: tenant1.example.com" localhost:10000 -v 2>&1 | grep "X-SHARD-ID"
-< X-SHARD-ID: shard-a
+$ curl -H "Host: tenant1.example.com" localhost:10000 -v 2>&1 | grep "x-shard-id"
+< x-shard-id: shard-a
 
 $ docker start redis_1
 ```
@@ -138,17 +138,17 @@ Test how the shard router handles various failure scenarios and edge cases.
 **Unknown tenant test:**
 
 ```console
-$ curl -H "Host: unknown.example.com" localhost:10000 -v 2>&1 | grep "X-SHARD-ID"
-# Should return no X-SHARD-ID header or default behavior
+$ curl -H "Host: unknown.example.com" localhost:10000 -v 2>&1 | grep "x-shard-id"
+# Should return no x-shard-id header or default behavior
 ```
 
 **Invalid tenant formats:**
 
 ```console
-$ curl -H "Host: .example.com" localhost:10000 -v 2>&1 | grep "X-SHARD-ID"
+$ curl -H "Host: .example.com" localhost:10000 -v 2>&1 | grep "x-shard-id"
 # Should handle malformed subdomain gracefully
 
-$ curl -H "X-Tenant-ID: " localhost:10000 -v 2>&1 | grep "X-SHARD-ID"
+$ curl -H "X-Tenant-ID: " localhost:10000 -v 2>&1 | grep "x-shard-id"
 # Should handle empty tenant ID
 ```
 
@@ -157,7 +157,7 @@ $ curl -H "X-Tenant-ID: " localhost:10000 -v 2>&1 | grep "X-SHARD-ID"
 ```console
 # Test with Minio unavailable
 $ docker stop minio_1
-$ curl -H "Host: newclient.example.com" localhost:10000 -v 2>&1 | grep "X-SHARD-ID"
+$ curl -H "Host: newclient.example.com" localhost:10000 -v 2>&1 | grep "x-shard-id"
 # Should handle S3 unavailability gracefully
 $ docker start minio_1
 ```
@@ -165,8 +165,8 @@ $ docker start minio_1
 **Existing shard header test:**
 
 ```console
-$ curl -H "Host: tenant1.example.com" -H "X-SHARD-ID: existing-shard" localhost:10000 -v 2>&1 | grep "X-SHARD-ID"
-< X-SHARD-ID: existing-shard
+$ curl -H "Host: tenant1.example.com" -H "x-shard-id: existing-shard" localhost:10000 -v 2>&1 | grep "x-shard-id"
+< x-shard-id: existing-shard
 # Should preserve existing shard header
 ```
 
